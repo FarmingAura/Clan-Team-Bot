@@ -1,151 +1,178 @@
+import os
 import discord
+import asyncio
+import re
 from discord.ext import commands, tasks
 from discord import app_commands
-import asyncio
-import os
-import re
-from datetime import datetime, timedelta
+from keep_alive import keep_alive
 from dotenv import load_dotenv
-import random
+import aiohttp
+from datetime import datetime, timedelta
 
 load_dotenv()
-TOKEN = os.getenv("TOKEN")
+TOKEN = os.getenv("DISCORD_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="~", intents=intents)
+warns = {}
+session = aiohttp.ClientSession()
 
-giveaways = {}
+# Webhook logger
+async def log_action(description, user=None):
+    embed = discord.Embed(title="Mod Log", description=description, color=discord.Color.red())
+    if user:
+        embed.set_footer(text=f"{user}", icon_url=user.avatar.url if user.avatar else None)
+    async with session.post(WEBHOOK_URL, json={"embeds": [embed.to_dict()]}) as r:
+        pass
 
+# Events
 @bot.event
 async def on_ready():
+    await bot.tree.sync()
     print(f"Logged in as {bot.user}")
-    try:
-        synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} slash commands.")
-    except Exception as e:
-        print(f"Sync error: {e}")
 
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
-    if "http" in message.content or "discord.gg/" in message.content:
-        if not message.author.guild_permissions.administrator:
+    if not message.author.guild_permissions.administrator:
+        if re.search(r"https?://", message.content):
             await message.delete()
-            embed = discord.Embed(title="🚫 Anti-Link", description=f"{message.author.mention}, links are not allowed!", color=discord.Color.red())
+            embed = discord.Embed(description="❌ No links allowed!", color=discord.Color.red())
             await message.channel.send(embed=embed)
     await bot.process_commands(message)
 
-# === BASIC EMBED COMMANDS OMITTED HERE FOR SPACE (same as previous response) ===
+# Basic commands
+@bot.command()
+async def ping(ctx):
+    await ctx.send(embed=discord.Embed(description=f"Pong! 🏓 `{round(bot.latency * 1000)}ms`", color=discord.Color.green()))
 
-# === /result slash command ===
-@bot.tree.command(name="result", description="Post an EI Team result")
-@app_commands.describe(
-    applicant="Mention the applicant",
-    username="Minecraft IGN",
-    region="Region (AS or EU)",
-    gamemode="Gamemode (Sword or Crystal)",
-    result="Test Result (Selected or Not Selected)"
-)
+@bot.command()
+async def say(ctx, *, msg):
+    await ctx.send(embed=discord.Embed(description=msg, color=discord.Color.blue()))
+
+@bot.command()
+async def clear(ctx, amount: int = 5):
+    await ctx.channel.purge(limit=amount + 1)
+    await ctx.send(embed=discord.Embed(description=f"🧹 Cleared {amount} messages", color=discord.Color.orange()), delete_after=3)
+
+@bot.command()
+async def kick(ctx, member: discord.Member, *, reason="No reason"):
+    await member.kick(reason=reason)
+    await ctx.send(embed=discord.Embed(description=f"Kicked {member.mention} - {reason}", color=discord.Color.red()))
+    await log_action(f"{ctx.author} kicked {member} for `{reason}`", member)
+
+@bot.command()
+async def ban(ctx, member: discord.Member, *, reason="No reason"):
+    await member.ban(reason=reason)
+    await ctx.send(embed=discord.Embed(description=f"Banned {member.mention} - {reason}", color=discord.Color.red()))
+    await log_action(f"{ctx.author} banned {member} for `{reason}`", member)
+
+@bot.command()
+async def warn(ctx, member: discord.Member, *, reason="No reason"):
+    uid = str(member.id)
+    warns[uid] = warns.get(uid, 0) + 1
+    await ctx.send(embed=discord.Embed(description=f"⚠️ Warned {member.mention} - {reason} (Total: {warns[uid]})", color=discord.Color.yellow()))
+    await log_action(f"{ctx.author} warned {member}: `{reason}`", member)
+    if warns[uid] >= 3:
+        await member.timeout(discord.utils.utcnow() + timedelta(minutes=10))
+        await ctx.send(embed=discord.Embed(description=f"⏳ {member.mention} timed out for 10 minutes (3 warns)", color=discord.Color.red()))
+        warns[uid] = 0
+
+@bot.command()
+async def avatar(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    await ctx.send(embed=discord.Embed(title=f"{member}'s Avatar", color=discord.Color.random()).set_image(url=member.avatar.url))
+
+@bot.command()
+async def userinfo(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    embed = discord.Embed(title=f"{member}", color=discord.Color.blurple())
+    embed.add_field(name="ID", value=member.id)
+    embed.add_field(name="Joined", value=member.joined_at.strftime("%Y-%m-%d %H:%M:%S"))
+    embed.add_field(name="Created", value=member.created_at.strftime("%Y-%m-%d %H:%M:%S"))
+    embed.set_thumbnail(url=member.avatar.url)
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def serverinfo(ctx):
+    guild = ctx.guild
+    embed = discord.Embed(title=guild.name, color=discord.Color.green())
+    embed.add_field(name="Members", value=guild.member_count)
+    embed.add_field(name="Owner", value=guild.owner)
+    embed.set_thumbnail(url=guild.icon.url)
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def accountage(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    age = discord.utils.utcnow() - member.created_at
+    await ctx.send(embed=discord.Embed(description=f"{member.mention}'s account is `{age.days}` days old", color=discord.Color.blurple()))
+
+# Slash command: /result
+@bot.tree.command(name="result", description="Post a team selection result")
+@app_commands.describe(applicant="Mention the applicant", username="Minecraft username", region="AS or EU", gamemode="Sword or Crystal", result="Selected or Not Selected")
 async def result(interaction: discord.Interaction, applicant: discord.Member, username: str, region: str, gamemode: str, result: str):
-    embed = discord.Embed(title="EI Team Selection Result 🏆", color=discord.Color.blue())
+    embed = discord.Embed(title="JUMPER'S Team Selection Result 🏆", color=discord.Color.blue())
+    embed.set_thumbnail(url=applicant.avatar.url)
     embed.add_field(name="Tester", value=interaction.user.mention, inline=False)
-    embed.add_field(name="Username", value=username, inline=False)
+    embed.add_field(name="Username", value=username, inline=True)
     embed.add_field(name="Region", value=region.upper(), inline=True)
     embed.add_field(name="Gamemode", value=gamemode, inline=True)
-    embed.add_field(name="Team Result", value=result, inline=False)
-    embed.set_thumbnail(url=applicant.display_avatar.url)
+    embed.add_field(name="Team Result", value=result, inline=True)
     await interaction.response.send_message(content=applicant.mention, embed=embed)
 
-# === Giveaway Commands ===
-def convert_time(time_str):
-    unit = time_str[-1]
-    if unit not in "smhd":
-        return None
-    try:
-        val = int(time_str[:-1])
-    except:
-        return None
-    return {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit] * val
-
+# Cool command: embedcreator
 @bot.command()
-@commands.has_permissions(manage_guild=True)
-async def gstart(ctx, time: str, winners: int, *, prize: str):
-    seconds = convert_time(time)
-    if seconds is None:
-        return await ctx.send("Invalid time format. Use `s/m/h/d`.")
-    
-    embed = discord.Embed(title="🎉 Giveaway!", color=discord.Color.blurple())
-    embed.add_field(name="Prize", value=prize)
-    embed.add_field(name="Hosted By", value=ctx.author.mention)
-    embed.add_field(name="Ends In", value=f"{time}")
+async def embedcreator(ctx, title, desc, image_url):
+    embed = discord.Embed(title=title, description=desc, color=discord.Color.blue())
+    embed.set_image(url=image_url)
+    await ctx.send(embed=embed)
+
+# Cool command: giveaway
+@bot.command()
+async def giveaway(ctx, duration: int, *, prize):
+    embed = discord.Embed(title="🎉 Giveaway 🎉", description=f"**Prize:** {prize}\nReact with 🎉 to enter!\nDuration: {duration} seconds", color=discord.Color.gold())
     msg = await ctx.send(embed=embed)
     await msg.add_reaction("🎉")
-    
-    giveaways[msg.id] = {
-        "end_time": datetime.utcnow() + timedelta(seconds=seconds),
-        "winners": winners,
-        "prize": prize,
-        "host": ctx.author.id,
-        "message": msg
-    }
-    
-    await asyncio.sleep(seconds)
-    new_msg = await ctx.channel.fetch_message(msg.id)
-    users = await new_msg.reactions[0].users().flatten()
-    users = [u for u in users if not u.bot]
-    if len(users) < winners:
-        await ctx.send("Not enough participants.")
+
+    await asyncio.sleep(duration)
+
+    msg = await ctx.channel.fetch_message(msg.id)
+    users = [u async for u in msg.reactions[0].users() if not u.bot]
+
+    if users:
+        winner = random.choice(users)
+        await ctx.send(embed=discord.Embed(description=f"🎊 Congratulations {winner.mention}, you won **{prize}**!", color=discord.Color.green()))
     else:
-        winners_list = random.sample(users, winners)
-        win_mentions = ", ".join(w.mention for w in winners_list)
-        result_embed = discord.Embed(title="🎉 Giveaway Ended", description=f"**Prize:** {prize}\n**Winner(s):** {win_mentions}", color=discord.Color.green())
-        await ctx.send(embed=result_embed)
+        await ctx.send("No participants.")
 
-@bot.command()
-@commands.has_permissions(manage_guild=True)
-async def gend(ctx, message_id: int):
-    try:
-        msg = await ctx.channel.fetch_message(message_id)
-        users = await msg.reactions[0].users().flatten()
-        users = [u for u in users if not u.bot]
-        winners = giveaways[message_id]["winners"]
-        prize = giveaways[message_id]["prize"]
-        if len(users) < winners:
-            return await ctx.send("Not enough participants.")
-        winners_list = random.sample(users, winners)
-        embed = discord.Embed(title="🎉 Giveaway Ended Early", description=f"**Prize:** {prize}\n**Winner(s):** {', '.join(w.mention for w in winners_list)}", color=discord.Color.gold())
-        await ctx.send(embed=embed)
-    except:
-        await ctx.send("Failed to end giveaway.")
-
-@bot.command()
-@commands.has_permissions(manage_guild=True)
-async def greroll(ctx, message_id: int):
-    try:
-        msg = await ctx.channel.fetch_message(message_id)
-        users = await msg.reactions[0].users().flatten()
-        users = [u for u in users if not u.bot]
-        winners = giveaways[message_id]["winners"]
-        prize = giveaways[message_id]["prize"]
-        if len(users) < winners:
-            return await ctx.send("Not enough participants.")
-        new_winners = random.sample(users, winners)
-        embed = discord.Embed(title="🔄 Giveaway Rerolled", description=f"**Prize:** {prize}\n**New Winner(s):** {', '.join(w.mention for w in new_winners)}", color=discord.Color.orange())
-        await ctx.send(embed=embed)
-    except:
-        await ctx.send("Failed to reroll giveaway.")
-
-# === Timer Command ===
+# Timer command
 @bot.command()
 async def timer(ctx, seconds: int):
-    embed = discord.Embed(title="⏳ Timer Started", description=f"{seconds} seconds remaining...", color=discord.Color.purple())
-    msg = await ctx.send(embed=embed)
-    while seconds > 0:
-        await asyncio.sleep(1)
-        seconds -= 1
-        embed.description = f"{seconds} seconds remaining..."
-        await msg.edit(embed=embed)
-    await msg.edit(embed=discord.Embed(title="⏰ Time's Up!", color=discord.Color.red()))
+    await ctx.send(embed=discord.Embed(description=f"⏳ Timer set for {seconds} seconds!", color=discord.Color.orange()))
+    await asyncio.sleep(seconds)
+    await ctx.send(embed=discord.Embed(description=f"⏰ Time's up!", color=discord.Color.red()))
 
+@bot.command()
+async def help(ctx):
+    embed = discord.Embed(
+        title="📜 JumperBot Help Menu",
+        description="Here are my commands:\n\n"
+                    "**</> Moderation**\n"
+                    "`~ping`, `~userinfo`, `~serverinfo`, `~accountage`, `~avatar`, `~banner`, `~say`, `~clear`, `~kick`, `~ban`, `~warn`\n\n"
+                    "**</> Anti-Link**\n"
+                    "Auto deletes links from non-admins.\n\n"
+                    "**</> Extras**\n"
+                    "`~giveaway`, `~timer`, `~embed`\n\n"
+                    "**</> Custom**\n"
+                    "`/result` - Post test results for Crystal/Sword applicants.",
+        color=discord.Color.blue()
+    )
+    embed.set_thumbnail(url="https://i.ibb.co/RTz5nPxt/JUMPERS.gif")
+    embed.set_footer(text="Requested by {}".format(ctx.author), icon_url=ctx.author.display_avatar.url)
+    await ctx.send(embed=embed)
+
+keep_alive()
 bot.run(TOKEN)
