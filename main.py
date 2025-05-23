@@ -2,6 +2,7 @@ import os
 import discord
 import asyncio
 import re
+import random
 from discord.ext import commands, tasks
 from discord import app_commands
 from keep_alive import keep_alive
@@ -16,21 +17,25 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="~", intents=intents)
 warns = {}
-session = aiohttp.ClientSession()
 
 # Webhook logger
 async def log_action(description, user=None):
     embed = discord.Embed(title="Mod Log", description=description, color=discord.Color.red())
     if user:
         embed.set_footer(text=f"{user}", icon_url=user.avatar.url if user.avatar else None)
-    async with session.post(WEBHOOK_URL, json={"embeds": [embed.to_dict()]}) as r:
+    async with bot.session.post(WEBHOOK_URL, json={"embeds": [embed.to_dict()]}) as r:
         pass
 
 # Events
 @bot.event
 async def on_ready():
+    bot.session = aiohttp.ClientSession()
     await bot.tree.sync()
     print(f"Logged in as {bot.user}")
+
+@bot.event
+async def on_close():
+    await bot.session.close()
 
 @bot.event
 async def on_message(message):
@@ -176,3 +181,10 @@ async def help(ctx):
 
 keep_alive()
 bot.run(TOKEN)
+
+# Make sure to close session when bot stops
+async def close_session():
+    await bot.session.close()
+
+import atexit
+atexit.register(lambda: asyncio.get_event_loop().run_until_complete(close_session()))
